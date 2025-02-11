@@ -17,7 +17,7 @@ class WebsocketModel:
         self.websocket: Optional[websockets.WebSocketClientProtocol] = None
         self.running = False
         self.current_koth_data: Optional[Dict[str, Any]] = None
-        # active subscriptions speichert für jeden mint den aktuell verwendeten Pair in einem Dict
+        # active_subscriptions speichert für jeden mint den aktuell verwendeten Pair in einem Dict
         self.active_subscriptions: Dict[str, str] = {}
         self.cache = SmartCache(max_size=500)
         self.worker_task: Optional[asyncio.Task] = None
@@ -97,12 +97,12 @@ class WebsocketModel:
                         logger.info("MigrationProgress 100 für mint %s, warte 1 Minute und poll dann Raydium Pool...", mint)
                         print(f"MigrationProgress 100 für mint {mint}, warte 1 Minute und poll dann Raydium Pool...")
                         await asyncio.sleep(60)
-                        # Nach dem Migrieren warten wir 60 Sekunden, bevor wir den Raydium Pool pollen
                         pair = await self.poll_for_raydium_pool(mint)
                     if pair:
                         self.active_subscriptions[mint] = pair
                         await self.subscribe_pair_stats(mint, pair)
-                        self.cache.add("subscription_" + mint, {"mint": mint, "pair": pair})
+                        # Speichere hier den kompletten token_data inklusive aller Token-Infos (mint, image, created_timestamp usw.)
+                        self.cache.add("subscription_" + mint, token_data)
                     else:
                         logger.error("Kein gültiger Pair-Wert für mint %s ermittelt.", mint)
                         print(f"Kein gültiger Pair-Wert für mint {mint} ermittelt.")
@@ -118,7 +118,7 @@ class WebsocketModel:
                                 print(f"Neuer Raydium Pool für mint {mint}: {new_pair}")
                                 self.active_subscriptions[mint] = new_pair
                                 await self.subscribe_pair_stats(mint, new_pair)
-                                self.cache.add("subscription_" + mint, {"mint": mint, "pair": new_pair})
+                                self.cache.add("subscription_" + mint, token_data)
                 await asyncio.sleep(20)
             except Exception as e:
                 logger.error("KOTH Tracking Error: %s", e)
@@ -152,6 +152,7 @@ class WebsocketModel:
             pair_info = payload.get("pair", {})
             stats_info = payload.get("pairStats", {})
             pair_address = pair_info.get("pairAddress")
+            # Ermittle den korrekten Token anhand der in active_subscriptions gespeicherten Pair-Adresse
             found_mint = None
             for mint, subscribed_pair in self.active_subscriptions.items():
                 if subscribed_pair == pair_address:
@@ -165,7 +166,9 @@ class WebsocketModel:
             logger.info("Token %s Update: Price: %s, Market Cap: %s, Liquidity: %s",
                         found_mint, pair_info.get("pairPrice1Usd"), pair_info.get("pairMarketcapUsd"), pair_info.get("pairReserves0Usd"))
             print(f"Token {found_mint} Update: Price: {pair_info.get('pairPrice1Usd')}, Market Cap: {pair_info.get('pairMarketcapUsd')}, Liquidity: {pair_info.get('pairReserves0Usd')}")
-            combined_data = {"pair": pair_info, "pairStats": stats_info}
+            # Kombiniere Pair-Informationen, Statistiken und MigrationProgress in einer Datenstruktur,
+            # die der View (Keys: "pair", "pairStats" und "migrationProgress") entspricht.
+            combined_data = {"pair": pair_info, "pairStats": stats_info, "migrationProgress": data.get("migrationProgress")}
             self.cache.add("pair_stats_" + found_mint, combined_data)
         except Exception as e:
             logger.error("Fehler beim Verarbeiten der Pair-Stats: %s", e)
@@ -209,8 +212,10 @@ class WebsocketModel:
     def get_active_data(self) -> Dict[str, Any]:
         data = {}
         for mint in self.active_subscriptions.keys():
-            stats = self.cache.get("pair_stats_" + mint)
-            if stats is None:
-                stats = {}
-            data[mint] = stats
+            subscription = self.cache.get("subscription_" + mint) or {}
+            stats = self.cache.get("pair_stats_" + mint) or {}
+            combined = {}
+            combined.update(subscription)
+            combined.update(stats)
+            data[mint] = combined
         return data

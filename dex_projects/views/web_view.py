@@ -1,4 +1,5 @@
 from nicegui import ui
+from datetime import datetime
 
 class DexWebView:
     def __init__(self, viewmodel):
@@ -51,7 +52,6 @@ class DexWebView:
                     label='Max Price Change 6h (%)',
                     placeholder='z.B. 15'
                 ).props('type=number')
-                # Filter für Migration Progress und FDV
                 self.min_migration_input = ui.input(
                     label='Min Migration Progress (%)',
                     placeholder='z.B. 50'
@@ -72,6 +72,10 @@ class DexWebView:
 
         self.table_all = ui.table(
             columns=[
+                {'name': 'mint', 'label': 'Mint', 'field': 'mint'},
+                {'name': 'image', 'label': 'Image', 'field': 'image',
+                 'template': "<img :src='row.image' class='w-16 h-16' />"},
+                {'name': 'created', 'label': 'Created', 'field': 'created'},
                 {'name': 'symbol', 'label': 'Symbol', 'field': 'symbol'},
                 {'name': 'name', 'label': 'Token Name', 'field': 'name'},
                 {'name': 'market_cap', 'label': 'Market Cap (USD)', 'field': 'market_cap'},
@@ -84,12 +88,16 @@ class DexWebView:
                 {'name': 'fdv', 'label': 'FDV (USD)', 'field': 'fdv'},
             ],
             rows=[],
-            row_key='symbol',
+            row_key='mint',
             pagination={'rowsPerPage': 10}
         ).classes('w-full')
 
         self.table_filtered = ui.table(
             columns=[
+                {'name': 'mint', 'label': 'Mint', 'field': 'mint'},
+                {'name': 'image', 'label': 'Image', 'field': 'image',
+                 'template': "<img :src='row.image' class='w-16 h-16' />"},
+                {'name': 'created', 'label': 'Created', 'field': 'created'},
                 {'name': 'symbol', 'label': 'Symbol', 'field': 'symbol'},
                 {'name': 'name', 'label': 'Token Name', 'field': 'name'},
                 {'name': 'market_cap', 'label': 'Market Cap (USD)', 'field': 'market_cap'},
@@ -102,29 +110,52 @@ class DexWebView:
                 {'name': 'fdv', 'label': 'FDV (USD)', 'field': 'fdv'},
             ],
             rows=[],
-            row_key='symbol',
+            row_key='mint',
             pagination={'rowsPerPage': 10}
         ).classes('w-full')
 
-        # Aktualisierung der "Alle Tokens"-Tabelle alle 3 Sekunden
-        ui.timer(3, self.update_all_table)
+        # Neuer Bereich für Top 20 Holder
+        with ui.card().classes("q-pa-md"):
+            ui.label("Top 20 Holder").classes("text-xl")
+            self.mint_input = ui.input(
+                label="Token Mint Address",
+                placeholder="z.B. 7xKXtg2CWgdmZQ6A54NDq8V5FZRjhzp9V5QD5VyZq...",
+                validation={'Invalid length': lambda v: len(v) >= 32}
+            ).classes("w-full")
+            ui.button("Show Top Holders", on_click=self.show_top_holders)
+        self.table_holders = ui.table(
+            columns=[
+                {'name': 'address', 'label': 'Address', 'field': 'address'},
+                {'name': 'percentage', 'label': 'Anteil', 'field': 'percentage'},
+                {'name': 'role', 'label': 'Rolle', 'field': 'role'}
+            ],
+            rows=[],
+            row_key='address'
+        ).classes("w-full")
+
+        ui.timer(10, self.update_all_table)
 
     def update_all_table(self):
         new_rows = []
         for mint, data in self.viewmodel.tokens.items():
+            token_mint = data.get('mint', 'N/A')
+            token_name = data.get('name', 'N/A')
+            token_symbol = data.get('symbol', 'N/A')
+            token_image = data.get('image_uri', 'N/A')
+            created_ts = data.get('created_timestamp')
+            if created_ts:
+                created_date = datetime.fromtimestamp(created_ts / 1000).strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                created_date = "N/A"
+
             pair_data = data.get('pair', {})
             pair_stats = data.get('pairStats', {})
 
             try:
-                symbol = pair_data.get('token1Symbol', 'N/A')
-                name = pair_data.get('token1Name', 'N/A')
                 market_cap = float(pair_data.get('pairMarketcapUsd', 0))
                 price = float(pair_data.get('pairPrice1Usd', 0))
-                fdv = float(pair_data.get('fdv', 0))
             except Exception:
-                symbol = 'N/A'
-                name = 'N/A'
-                market_cap = price = fdv = 0.0
+                market_cap = price = 0.0
 
             try:
                 five_min_stats = pair_stats.get('fiveMin', {})
@@ -143,6 +174,11 @@ class DexWebView:
             except Exception:
                 migration_progress = 0.0
 
+            try:
+                fdv = float(pair_data.get('fdv', 0))
+            except Exception:
+                fdv = 0.0
+
             formatted_market_cap = f"${market_cap:,.2f}" if market_cap else "N/A"
             formatted_price = f"${price:,.8f}" if price else "N/A"
             formatted_change_5min = f"{change_5min:.2f}%" if change_5min else "0.00%"
@@ -153,8 +189,11 @@ class DexWebView:
             formatted_fdv = f"${fdv:,.2f}" if fdv else "N/A"
 
             new_rows.append({
-                'symbol': symbol,
-                'name': name,
+                'mint': token_mint,
+                'image': token_image,
+                'created': created_date,
+                'symbol': token_symbol,
+                'name': token_name,
                 'market_cap': formatted_market_cap,
                 'price': formatted_price,
                 'change_5min': formatted_change_5min,
@@ -166,6 +205,53 @@ class DexWebView:
             })
         self.table_all.rows = new_rows
         self.table_all.update()
+
+    async def show_top_holders(self):
+        mint_address = self.mint_input.value.strip()
+        if not mint_address:
+            ui.notify("Bitte Mint-Adresse eingeben", color="negative")
+            return
+        if len(mint_address) < 32:
+            ui.notify("Ungültige Mint-Adresse (zu kurz)", color="negative")
+            return
+
+        try:
+            await self.viewmodel.load_top_holders(mint_address)
+            self.update_top_holders_table()
+            ui.notify(f"Top Holder für {mint_address[:6]}... geladen", color="positive")
+        except Exception as e:
+            ui.notify(f"Fehler: {str(e)}", color="negative")
+
+    def update_top_holders_table(self):
+        rows = []
+        vm = self.viewmodel  
+        
+        for holder in vm.top_holders:
+            address = holder["address"]
+            role = ""
+            
+            # Rollenüberprüfung
+            if address == vm.selected_token_creator:
+                role = "👑 Dev"
+            elif address == vm.bonding_curve:
+                role = "📈 Bonding Curve"
+            elif address == vm.associated_bonding_curve:
+                role = "🔗 Associated Curve"
+            
+            rows.append({
+                "address": address,
+                "percentage": holder["percentage"],
+                "role": role  
+            })
+        
+        self.table_holders.columns = [
+            {'name': 'address', 'label': 'Address', 'field': 'address'},
+            {'name': 'percentage', 'label': 'Anteil', 'field': 'percentage'},
+            {'name': 'role', 'label': 'Rolle', 'field': 'role'}
+        ]
+        
+        self.table_holders.rows = rows
+        self.table_holders.update()
 
     def apply_filters(self):
         try:
@@ -241,15 +327,21 @@ class DexWebView:
 
         filtered_rows = []
         for mint, data in self.viewmodel.tokens.items():
-            pair_data = data.get('pair', {})
-            pair_stats = data.get('pairStats', {})
+            token_mint = data.get('mint', 'N/A')
+            token_name = data.get('name', 'N/A')
+            token_symbol = data.get('symbol', 'N/A')
+            token_image = data.get('image_uri', 'N/A')
+            created_ts = data.get('created_timestamp')
+            if created_ts:
+                created_date = datetime.fromtimestamp(created_ts / 1000).strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                created_date = "N/A"
 
             try:
-                symbol = pair_data.get('token1Symbol', 'N/A')
-                name = pair_data.get('token1Name', 'N/A')
+                pair_data = data.get('pair', {})
+                pair_stats = data.get('pairStats', {})
                 market_cap = float(pair_data.get('pairMarketcapUsd', 0))
                 price = float(pair_data.get('pairPrice1Usd', 0))
-                fdv = float(pair_data.get('fdv', 0))
             except Exception:
                 continue
 
@@ -269,6 +361,11 @@ class DexWebView:
                 migration_progress = float(data.get('migrationProgress', 0))
             except Exception:
                 migration_progress = 0.0
+
+            try:
+                fdv = float(pair_data.get('fdv', 0))
+            except Exception:
+                fdv = 0.0
 
             if min_market_cap is not None and market_cap < min_market_cap:
                 continue
@@ -309,8 +406,11 @@ class DexWebView:
             formatted_fdv = f"${fdv:,.2f}" if fdv else "N/A"
 
             filtered_rows.append({
-                'symbol': symbol,
-                'name': name,
+                'mint': token_mint,
+                'image': token_image,
+                'created': created_date,
+                'symbol': token_symbol,
+                'name': token_name,
                 'market_cap': formatted_market_cap,
                 'price': formatted_price,
                 'change_5min': formatted_change_5min,
